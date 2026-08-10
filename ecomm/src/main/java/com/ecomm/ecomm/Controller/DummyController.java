@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class DummyController{
 
-    @GetMapping("/")
+    @GetMapping("/health")
     public String getString(){
         return "Welcome to Om Jwellery";
     }

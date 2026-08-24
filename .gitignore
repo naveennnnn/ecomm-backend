@@ -1,0 +1,17 @@
+# Secrets
+env.properties
+*.env
+.env
+
+# Build
+target/
+
+# IDE
+.idea/
+*.iml
+*.iws
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

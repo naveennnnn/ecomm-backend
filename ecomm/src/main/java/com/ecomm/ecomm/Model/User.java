@@ -34,6 +34,9 @@ public class User {
     @Column(nullable = false)
     private boolean profileComplete = false;
 
+    @Column(nullable = false)
+    private String role = "USER";
+
     private String refreshToken;
 
     private LocalDateTime refreshTokenExpiry;

@@ -28,7 +28,9 @@ public class SecurityConfig {
                 .requestMatchers("/api/auth/refresh").permitAll()
                 .requestMatchers("/api/auth/logout").permitAll()
                 .requestMatchers("/api/auth/**").authenticated()
-                .anyRequest().permitAll()
+                .requestMatchers("GET", "/api/products/**").permitAll()
+                .requestMatchers("/health").permitAll()
+                .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth2 -> oauth2
                 .jwt(jwt -> {})

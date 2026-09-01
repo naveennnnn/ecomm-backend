@@ -39,6 +39,33 @@ public class AuthController {
         this.jwtService = jwtService;
     }
 
+    /**
+     * Returns the current authenticated user's profile including role.
+     * Authenticated via the access_token cookie (JwtCookieFilter sets principal to firebase UID).
+     */
+    @GetMapping("/me")
+    public ResponseEntity<?> me(org.springframework.security.core.Authentication authentication) {
+        if (authentication == null || authentication.getPrincipal() == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "Not authenticated"));
+        }
+
+        String uid = (String) authentication.getPrincipal();
+        Optional<User> optionalUser = userRepository.findByFirebaseUid(uid);
+        if (optionalUser.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("message", "User not found"));
+        }
+
+        User user = optionalUser.get();
+        return ResponseEntity.ok(Map.of(
+                "name", user.getName(),
+                "email", user.getEmail(),
+                "role", user.getRole(),
+                "profileComplete", user.isProfileComplete()
+        ));
+    }
+
     @PostMapping("/signup")
     public ResponseEntity<?> signup(@AuthenticationPrincipal Jwt jwt, @RequestBody Map<String, String> body) {
         String uid = jwt.getSubject();

@@ -1,35 +1,30 @@
 package com.ecomm.ecomm.Controller;
 
 import com.ecomm.ecomm.Model.Product;
-import com.ecomm.ecomm.Model.User;
-import com.ecomm.ecomm.Repository.ProductRepository;
-import com.ecomm.ecomm.Repository.UserRepository;
-import com.ecomm.ecomm.Service.StorageService;
+import com.ecomm.ecomm.Service.CreateProductCommand;
+import com.ecomm.ecomm.Service.ProductService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 
+/**
+ * HTTP layer for products. Delegates all business logic to {@link ProductService}
+ * (SRP + DIP) and relies on method security for authorization (OCP) rather than
+ * hand-rolled role checks.
+ */
 @RestController
 @RequestMapping("/api/products")
 public class ProductController {
 
-    private final ProductRepository productRepository;
-    private final UserRepository userRepository;
-    private final StorageService storageService;
+    private final ProductService productService;
 
-    public ProductController(ProductRepository productRepository,
-                             UserRepository userRepository,
-                             StorageService storageService) {
-        this.productRepository = productRepository;
-        this.userRepository = userRepository;
-        this.storageService = storageService;
+    public ProductController(ProductService productService) {
+        this.productService = productService;
     }
 
     /**
@@ -37,7 +32,7 @@ public class ProductController {
      */
     @GetMapping
     public ResponseEntity<List<Product>> getAllProducts() {
-        return ResponseEntity.ok(productRepository.findByActiveTrue());
+        return ResponseEntity.ok(productService.getActiveProducts());
     }
 
     /**
@@ -45,7 +40,7 @@ public class ProductController {
      */
     @GetMapping("/category/{category}")
     public ResponseEntity<List<Product>> getByCategory(@PathVariable String category) {
-        return ResponseEntity.ok(productRepository.findByCategoryAndActiveTrue(category));
+        return ResponseEntity.ok(productService.getByCategory(category));
     }
 
     /**
@@ -53,63 +48,38 @@ public class ProductController {
      */
     @GetMapping("/search")
     public ResponseEntity<List<Product>> searchProducts(@RequestParam String q) {
-        return ResponseEntity.ok(productRepository.findByNameContainingIgnoreCaseAndActiveTrue(q));
+        return ResponseEntity.ok(productService.searchByName(q));
     }
 
     /**
      * Get single product — public endpoint
      */
     @GetMapping("/{id}")
-    public ResponseEntity<?> getProduct(@PathVariable Long id) {
-        Optional<Product> product = productRepository.findById(id);
-        if (product.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-        return ResponseEntity.ok(product.get());
+    public ResponseEntity<Product> getProduct(@PathVariable Long id) {
+        return productService.getById(id)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     /**
-     * Create a product — ADMIN only
+     * Create a product — ADMIN only (enforced by method security).
      */
     @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> createProduct(
-            Authentication authentication,
-            @RequestParam("name") String name,
-            @RequestParam("description") String description,
-            @RequestParam("price") BigDecimal price,
-            @RequestParam("originalPrice") BigDecimal originalPrice,
-            @RequestParam("category") String category,
-            @RequestParam("brand") String brand,
-            @RequestParam("stock") int stock,
-            @RequestParam("image") MultipartFile image) {
+            @RequestParam String name,
+            @RequestParam String description,
+            @RequestParam BigDecimal price,
+            @RequestParam BigDecimal originalPrice,
+            @RequestParam String category,
+            @RequestParam String brand,
+            @RequestParam int stock,
+            @RequestParam MultipartFile image) throws Exception {
 
-        // Check admin role
-        String uid = (String) authentication.getPrincipal();
-        Optional<User> optionalUser = userRepository.findByFirebaseUid(uid);
-        if (optionalUser.isEmpty() || !"ADMIN".equals(optionalUser.get().getRole())) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(Map.of("message", "Admin access required"));
-        }
+        CreateProductCommand command = new CreateProductCommand(
+                name, description, price, originalPrice, category, brand, stock, image);
 
-        try {
-            String imageUrl = storageService.uploadFile(image);
-
-            Product product = new Product();
-            product.setName(name);
-            product.setDescription(description);
-            product.setPrice(price);
-            product.setOriginalPrice(originalPrice);
-            product.setCategory(category);
-            product.setBrand(brand);
-            product.setStock(stock);
-            product.setImageUrl(imageUrl);
-
-            productRepository.save(product);
-
-            return ResponseEntity.status(HttpStatus.CREATED).body(product);
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("message", "Failed to create product: " + e.getMessage()));
-        }
+        Product product = productService.createProduct(command);
+        return ResponseEntity.status(HttpStatus.CREATED).body(product);
     }
 }

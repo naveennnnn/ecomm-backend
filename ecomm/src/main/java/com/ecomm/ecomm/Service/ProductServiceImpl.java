@@ -33,6 +33,11 @@ public class ProductServiceImpl implements ProductService {
     }
 
     @Override
+    public List<Product> getLatestProducts() {
+        return productRepository.findTop10ByActiveTrueOrderByCreatedAtDesc();
+    }
+
+    @Override
     public List<Product> getByCategory(String category) {
         return productRepository.findByCategoryAndActiveTrue(category);
     }
@@ -49,7 +54,10 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     public Product createProduct(CreateProductCommand command) throws IOException {
-        String imageUrl = mediaStorageService.uploadFile(command.image());
+        List<String> imageUrls = mediaStorageService.uploadFiles(command.images());
+        if (imageUrls.isEmpty()) {
+            throw new IOException("At least one product image is required");
+        }
 
         Product product = new Product();
         product.setName(command.name());
@@ -59,7 +67,8 @@ public class ProductServiceImpl implements ProductService {
         product.setCategory(command.category());
         product.setBrand(command.brand());
         product.setStock(command.stock());
-        product.setImageUrl(imageUrl);
+        product.setImageUrls(imageUrls);
+        product.setImageUrl(imageUrls.get(0)); // first image is the primary/thumbnail
 
         return productRepository.save(product);
     }

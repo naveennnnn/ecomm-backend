@@ -36,6 +36,14 @@ public class ProductController {
     }
 
     /**
+     * Get the latest 10 active products — public endpoint (used by the home carousel)
+     */
+    @GetMapping("/latest")
+    public ResponseEntity<List<Product>> getLatestProducts() {
+        return ResponseEntity.ok(productService.getLatestProducts());
+    }
+
+    /**
      * Get products by category — public endpoint
      */
     @GetMapping("/category/{category}")
@@ -74,10 +82,10 @@ public class ProductController {
             @RequestParam String category,
             @RequestParam String brand,
             @RequestParam int stock,
-            @RequestParam MultipartFile image) throws Exception {
+            @RequestParam("images") List<MultipartFile> images) throws Exception {
 
         CreateProductCommand command = new CreateProductCommand(
-                name, description, price, originalPrice, category, brand, stock, image);
+                name, description, price, originalPrice, category, brand, stock, images);
 
         Product product = productService.createProduct(command);
         return ResponseEntity.status(HttpStatus.CREATED).body(product);

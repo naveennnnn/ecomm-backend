@@ -3,6 +3,8 @@ package com.ecomm.ecomm.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Abstraction over the media storage/CDN provider.
@@ -21,6 +23,27 @@ public interface MediaStorageService {
      * @throws IOException if the upload fails
      */
     String uploadFile(MultipartFile file) throws IOException;
+
+    /**
+     * Uploads multiple files, preserving order, and returns their public URLs.
+     * <p>
+     * Default implementation uploads each file sequentially via
+     * {@link #uploadFile(MultipartFile)}, so provider implementations only need
+     * to implement the single-file upload.
+     *
+     * @param files the uploaded multipart files
+     * @return public URLs in the same order as the input files
+     * @throws IOException if any upload fails
+     */
+    default List<String> uploadFiles(List<MultipartFile> files) throws IOException {
+        List<String> urls = new ArrayList<>();
+        for (MultipartFile file : files) {
+            if (file != null && !file.isEmpty()) {
+                urls.add(uploadFile(file));
+            }
+        }
+        return urls;
+    }
 
     /**
      * Deletes a previously uploaded file.

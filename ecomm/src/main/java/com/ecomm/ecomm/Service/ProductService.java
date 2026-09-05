@@ -16,6 +16,8 @@ public interface ProductService {
 
     List<Product> getActiveProducts();
 
+    List<Product> getLatestProducts();
+
     List<Product> getByCategory(String category);
 
     List<Product> searchByName(String query);

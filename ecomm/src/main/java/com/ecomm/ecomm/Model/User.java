@@ -36,6 +36,8 @@ public class User {
 
     private String refreshToken;
 
+    private String refreshTokenFamily;
+
     private LocalDateTime refreshTokenExpiry;
 
     private LocalDateTime createdAt = LocalDateTime.now();

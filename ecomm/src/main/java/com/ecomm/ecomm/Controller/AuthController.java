@@ -3,9 +3,6 @@ package com.ecomm.ecomm.Controller;
 import com.ecomm.ecomm.Model.User;
 import com.ecomm.ecomm.Repository.UserRepository;
 import com.ecomm.ecomm.Service.JwtService;
-import jakarta.servlet.http.Cookie;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -17,9 +14,22 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * Auth endpoints using a token-based flow (no cookies) so the app works reliably
+ * across sites and on mobile browsers that block third-party cookies.
+ *
+ * <ul>
+ *   <li>Access token: returned in the response body; the client keeps it in memory
+ *       and sends it as {@code Authorization: Bearer <token>}.</li>
+ *   <li>Refresh token: returned in the response body; the client stores it (e.g.
+ *       localStorage) and posts it back to {@code /refresh}. Refresh tokens are
+ *       rotated on every use and protected by reuse detection.</li>
+ * </ul>
+ */
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -27,17 +37,9 @@ public class AuthController {
     private final UserRepository userRepository;
     private final JwtService jwtService;
 
-    @Value("${jwt.access-expiry}")
-    private long accessExpiry;
-
     @Value("${jwt.refresh-expiry}")
     private long refreshExpiry;
 
-    @Value("${app.cookie.secure:false}")
-    private boolean cookieSecure;
-
-    @Value("${app.cookie.same-site:Lax}")
-    private String cookieSameSite;
 
     public AuthController(UserRepository userRepository, JwtService jwtService) {
         this.userRepository = userRepository;
@@ -46,7 +48,7 @@ public class AuthController {
 
     /**
      * Returns the current authenticated user's profile including role.
-     * Authenticated via the access_token cookie (JwtCookieFilter sets principal to firebase UID).
+     * Authenticated via the Authorization: Bearer access token.
      */
     @GetMapping("/me")
     public ResponseEntity<?> me(org.springframework.security.core.Authentication authentication) {
@@ -94,7 +96,7 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<?> login(@AuthenticationPrincipal Jwt jwt, HttpServletResponse response) {
+    public ResponseEntity<?> login(@AuthenticationPrincipal Jwt jwt) {
         String uid = jwt.getSubject();
         String email = jwt.getClaimAsString("email");
         Boolean emailVerified = jwt.getClaim("email_verified");
@@ -113,19 +115,11 @@ public class AuthController {
         User user = optionalUser.get();
         user.setVerified(true);
 
-        String accessToken = jwtService.generateAccessToken(uid, email);
-        String refreshToken = jwtService.generateRefreshToken();
-        user.setRefreshToken(refreshToken);
-        user.setRefreshTokenExpiry(LocalDateTime.now().plus(Duration.ofMillis(refreshExpiry)));
-        userRepository.save(user);
-
-        addTokenCookies(response, accessToken, refreshToken);
-
-        return ResponseEntity.ok(Map.of("profileComplete", user.isProfileComplete()));
+        return ResponseEntity.ok(issueTokens(user, Map.of("profileComplete", user.isProfileComplete())));
     }
 
     @PostMapping("/google")
-    public ResponseEntity<?> googleAuth(@AuthenticationPrincipal Jwt jwt, HttpServletResponse response) {
+    public ResponseEntity<?> googleAuth(@AuthenticationPrincipal Jwt jwt) {
         String uid = jwt.getSubject();
         String email = jwt.getClaimAsString("email");
         String name = jwt.getClaimAsString("name");
@@ -134,15 +128,7 @@ public class AuthController {
 
         if (optionalUser.isPresent()) {
             User user = optionalUser.get();
-            String accessToken = jwtService.generateAccessToken(uid, email);
-            String refreshToken = jwtService.generateRefreshToken();
-            user.setRefreshToken(refreshToken);
-            user.setRefreshTokenExpiry(LocalDateTime.now().plus(Duration.ofMillis(refreshExpiry)));
-            userRepository.save(user);
-
-            addTokenCookies(response, accessToken, refreshToken);
-
-            return ResponseEntity.ok(Map.of("profileComplete", user.isProfileComplete()));
+            return ResponseEntity.ok(issueTokens(user, Map.of("profileComplete", user.isProfileComplete())));
         } else {
             User user = new User();
             user.setFirebaseUid(uid);
@@ -161,10 +147,8 @@ public class AuthController {
 
     @PostMapping("/complete-profile")
     public ResponseEntity<?> completeProfile(@AuthenticationPrincipal Jwt jwt,
-                                             @RequestBody Map<String, String> body,
-                                             HttpServletResponse response) {
+                                             @RequestBody Map<String, String> body) {
         String uid = jwt.getSubject();
-        String email = jwt.getClaimAsString("email");
 
         Optional<User> optionalUser = userRepository.findByFirebaseUid(uid);
         if (optionalUser.isEmpty()) {
@@ -177,120 +161,110 @@ public class AuthController {
         user.setAddress(body.get("address"));
         user.setProfileComplete(true);
 
-        String accessToken = jwtService.generateAccessToken(uid, email);
-        String refreshToken = jwtService.generateRefreshToken();
-        user.setRefreshToken(refreshToken);
-        user.setRefreshTokenExpiry(LocalDateTime.now().plus(Duration.ofMillis(refreshExpiry)));
-        userRepository.save(user);
-
-        addTokenCookies(response, accessToken, refreshToken);
-
-        return ResponseEntity.ok(Map.of("profileComplete", true));
+        return ResponseEntity.ok(issueTokens(user, Map.of("profileComplete", true)));
     }
 
+    /**
+     * Rotating refresh with reuse detection.
+     * Client posts {"refreshToken": "..."}. On success a NEW refresh token is
+     * returned and the old one is invalidated. If a token that does not match the
+     * user's current refresh token is presented, we treat it as a stolen/replayed
+     * token and revoke the whole chain (forcing re-login).
+     */
     @PostMapping("/refresh")
-    public ResponseEntity<?> refresh(HttpServletRequest request, HttpServletResponse response) {
-        String refreshToken = extractCookie(request, "refresh_token");
-
-        if (refreshToken == null) {
+    public ResponseEntity<?> refresh(@RequestBody Map<String, String> body) {
+        String presented = body.get("refreshToken");
+        if (presented == null || presented.isBlank()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("message", "No refresh token"));
         }
 
-        Optional<User> optionalUser = userRepository.findByRefreshToken(refreshToken);
+        // The presented token encodes a family id so we can locate the user even
+        // after the token value itself has been rotated away.
+        String familyId = jwtService.extractRefreshFamily(presented);
+        if (familyId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "Invalid refresh token"));
+        }
+
+        Optional<User> optionalUser = userRepository.findByRefreshTokenFamily(familyId);
         if (optionalUser.isEmpty()) {
-            clearTokenCookies(response);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("message", "Invalid refresh token"));
         }
 
         User user = optionalUser.get();
 
-        if (user.getRefreshTokenExpiry().isBefore(LocalDateTime.now())) {
+        // Reuse detection: the presented token must match the current stored token.
+        // A mismatch means an older (already-rotated) token was replayed -> revoke.
+        if (user.getRefreshToken() == null || !user.getRefreshToken().equals(presented)) {
             user.setRefreshToken(null);
             user.setRefreshTokenExpiry(null);
+            user.setRefreshTokenFamily(null);
             userRepository.save(user);
-            clearTokenCookies(response);
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("message", "Refresh token reuse detected. Please login again."));
+        }
+
+        if (user.getRefreshTokenExpiry() == null
+                || user.getRefreshTokenExpiry().isBefore(LocalDateTime.now())) {
+            user.setRefreshToken(null);
+            user.setRefreshTokenExpiry(null);
+            user.setRefreshTokenFamily(null);
+            userRepository.save(user);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("message", "Refresh token expired. Please login again."));
         }
 
+        // Rotate: issue a new refresh token within the same family, plus a new access token.
         String accessToken = jwtService.generateAccessToken(user.getFirebaseUid(), user.getEmail());
-        addAccessTokenCookie(response, accessToken);
+        String newRefresh = jwtService.generateRefreshToken(familyId);
+        user.setRefreshToken(newRefresh);
+        user.setRefreshTokenExpiry(LocalDateTime.now().plus(Duration.ofMillis(refreshExpiry)));
+        userRepository.save(user);
 
-        return ResponseEntity.ok(Map.of("message", "Token refreshed"));
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("accessToken", accessToken);
+        resp.put("refreshToken", newRefresh);
+        return ResponseEntity.ok(resp);
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<?> logoutUser(HttpServletRequest request, HttpServletResponse response) {
-        String refreshToken = extractCookie(request, "refresh_token");
-
-        if (refreshToken != null) {
-            Optional<User> optionalUser = userRepository.findByRefreshToken(refreshToken);
-            optionalUser.ifPresent(user -> {
-                user.setRefreshToken(null);
-                user.setRefreshTokenExpiry(null);
-                userRepository.save(user);
-            });
+    public ResponseEntity<?> logoutUser(@RequestBody(required = false) Map<String, String> body) {
+        String presented = body != null ? body.get("refreshToken") : null;
+        if (presented != null && !presented.isBlank()) {
+            String familyId = jwtService.extractRefreshFamily(presented);
+            if (familyId != null) {
+                userRepository.findByRefreshTokenFamily(familyId).ifPresent(user -> {
+                    user.setRefreshToken(null);
+                    user.setRefreshTokenExpiry(null);
+                    user.setRefreshTokenFamily(null);
+                    userRepository.save(user);
+                });
+            }
         }
-
-        clearTokenCookies(response);
         return ResponseEntity.ok(Map.of("message", "Logged out successfully"));
     }
 
-    // --- Cookie helpers ---
+    // --- helpers ---
 
-    private void addTokenCookies(HttpServletResponse response, String accessToken, String refreshToken) {
-        addAccessTokenCookie(response, accessToken);
+    /**
+     * Issues a fresh access + refresh token pair (new family) for the given user,
+     * persists refresh state, and merges the extra response fields.
+     */
+    private Map<String, Object> issueTokens(User user, Map<String, Object> extra) {
+        String familyId = jwtService.generateRefreshFamily();
+        String accessToken = jwtService.generateAccessToken(user.getFirebaseUid(), user.getEmail());
+        String refreshToken = jwtService.generateRefreshToken(familyId);
 
-        ResponseCookie refreshCookie = ResponseCookie.from("refresh_token", refreshToken)
-                .httpOnly(true)
-                .secure(cookieSecure)
-                .sameSite(cookieSameSite)
-                .path("/api/auth/refresh")
-                .maxAge(refreshExpiry / 1000)
-                .build();
-        response.addHeader(HttpHeaders.SET_COOKIE, refreshCookie.toString());
-    }
+        user.setRefreshToken(refreshToken);
+        user.setRefreshTokenFamily(familyId);
+        user.setRefreshTokenExpiry(LocalDateTime.now().plus(Duration.ofMillis(refreshExpiry)));
+        userRepository.save(user);
 
-    private void addAccessTokenCookie(HttpServletResponse response, String accessToken) {
-        ResponseCookie accessCookie = ResponseCookie.from("access_token", accessToken)
-                .httpOnly(true)
-                .secure(cookieSecure)
-                .sameSite(cookieSameSite)
-                .path("/")
-                .maxAge(accessExpiry / 1000)
-                .build();
-        response.addHeader(HttpHeaders.SET_COOKIE, accessCookie.toString());
-    }
-
-    private void clearTokenCookies(HttpServletResponse response) {
-        ResponseCookie accessCookie = ResponseCookie.from("access_token", "")
-                .httpOnly(true)
-                .secure(cookieSecure)
-                .sameSite(cookieSameSite)
-                .path("/")
-                .maxAge(0)
-                .build();
-        response.addHeader(HttpHeaders.SET_COOKIE, accessCookie.toString());
-
-        ResponseCookie refreshCookie = ResponseCookie.from("refresh_token", "")
-                .httpOnly(true)
-                .secure(cookieSecure)
-                .sameSite(cookieSameSite)
-                .path("/api/auth/refresh")
-                .maxAge(0)
-                .build();
-        response.addHeader(HttpHeaders.SET_COOKIE, refreshCookie.toString());
-    }
-
-    private String extractCookie(HttpServletRequest request, String name) {
-        if (request.getCookies() == null) return null;
-        for (Cookie cookie : request.getCookies()) {
-            if (name.equals(cookie.getName())) {
-                return cookie.getValue();
-            }
-        }
-        return null;
+        Map<String, Object> resp = new HashMap<>(extra);
+        resp.put("accessToken", accessToken);
+        resp.put("refreshToken", refreshToken);
+        return resp;
     }
 }

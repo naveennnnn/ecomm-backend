@@ -36,8 +36,49 @@ public class JwtService {
                 .compact();
     }
 
-    public String generateRefreshToken() {
+    /**
+     * A refresh-token "family" identifier, created once per login. It stays
+     * constant across rotations so the server can locate the owning user even
+     * after the token value itself has changed.
+     */
+    public String generateRefreshFamily() {
         return UUID.randomUUID().toString();
+    }
+
+    /**
+     * Generates a signed refresh token bound to a family id. Each call produces a
+     * unique token (random jti) so rotation always yields a new value, while the
+     * embedded family id lets us find the user and detect reuse of old tokens.
+     */
+    public String generateRefreshToken(String familyId) {
+        return Jwts.builder()
+                .subject(familyId)
+                .claim("typ", "refresh")
+                .id(UUID.randomUUID().toString())
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + refreshExpiry))
+                .signWith(getSigningKey())
+                .compact();
+    }
+
+    /**
+     * Extracts the family id from a refresh token, or null if the token is
+     * invalid, expired, or not a refresh token.
+     */
+    public String extractRefreshFamily(String refreshToken) {
+        try {
+            var claims = Jwts.parser()
+                    .verifyWith(getSigningKey())
+                    .build()
+                    .parseSignedClaims(refreshToken)
+                    .getPayload();
+            if (!"refresh".equals(claims.get("typ", String.class))) {
+                return null;
+            }
+            return claims.getSubject();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public long getRefreshExpiry() {

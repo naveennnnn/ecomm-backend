@@ -5,9 +5,9 @@ import com.ecomm.ecomm.Repository.UserRepository;
 import com.ecomm.ecomm.Service.JwtService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -19,17 +19,19 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Filter that extracts the access_token from an HttpOnly cookie
- * and sets the authentication in the SecurityContext.
- * This runs for protected API endpoints that use our custom JWT (not Firebase).
+ * Reads the access token from the {@code Authorization: Bearer <token>} header
+ * and sets authentication in the SecurityContext.
+ * <p>
+ * Header-based auth (instead of cookies) so the API works reliably across sites
+ * and on mobile browsers that block third-party cookies.
  */
 @Component
-public class JwtCookieFilter extends OncePerRequestFilter {
+public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
     private final UserRepository userRepository;
 
-    public JwtCookieFilter(JwtService jwtService, UserRepository userRepository) {
+    public JwtAuthFilter(JwtService jwtService, UserRepository userRepository) {
         this.jwtService = jwtService;
         this.userRepository = userRepository;
     }
@@ -39,7 +41,7 @@ public class JwtCookieFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        String token = extractCookie(request, "access_token");
+        String token = extractBearerToken(request);
 
         if (token != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             try {
@@ -51,19 +53,17 @@ public class JwtCookieFilter extends OncePerRequestFilter {
                                 uid, null, List.of(new SimpleGrantedAuthority("ROLE_" + role)));
                 SecurityContextHolder.getContext().setAuthentication(authentication);
             } catch (Exception ignored) {
-                // Token invalid or expired — let the request proceed unauthenticated
+                // Token invalid or expired — proceed unauthenticated.
             }
         }
 
         filterChain.doFilter(request, response);
     }
 
-    private String extractCookie(HttpServletRequest request, String name) {
-        if (request.getCookies() == null) return null;
-        for (Cookie cookie : request.getCookies()) {
-            if (name.equals(cookie.getName())) {
-                return cookie.getValue();
-            }
+    private String extractBearerToken(HttpServletRequest request) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (header != null && header.startsWith("Bearer ")) {
+            return header.substring(7).trim();
         }
         return null;
     }
